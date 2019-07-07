@@ -283,3 +283,159 @@ $ ./hserver 9190
 $ ./hclient 127.0.0.1 9190
 ```
 服务器端程序因为使用了`INADDR_ANY`可以自动分配IP地址，只需要指定端口号即可。客户端程序的第一个参数为本地回环IP地址，因为服务器运行在本地，如果运行在其他电脑也可以改为相应的IP地址，后面接相同的在服务器端程序中指定的端口。
+
+##基于TCP的S/C
+
+之前解释了创建套接字和分配地址，这一部分开始讨论面向连接的服务器和客户端（S/C）。TCP套接字面向连接且基于流（stream），对数据传输有更多控制（TCP Transmission Control Protocol）。根据四层网络TCP/IP协议栈模型（由下到上：链路层、IP层、TCP层/UDP层、应用层），TCP或UDP位于第三层，即IP层和应用层之间。分层的目的是为了把网络通讯这个复杂问题化小，并通过逐个标准化设计开放式系统。所谓开放式系统，就是制定行业标准并公开，以便各个厂家遵守以生产可以相互兼容的设备。
+
+这里补充一下OSI的7层网络模型，由下到上分别为物理层、数据链路层、网络层、传输层、会话层、表示层、应用层，IP协议工作在自下而上的第三层网络层，负责网络地址的分配和管理，TCP协议工作在第四层传输层，负责对数据传输过程的控制和管理。
+
+回到四层模型，链路层对网络的物理连接做标准化，对应局域网LAN(Local Area Network)、广域网WAN(Wide)和城域网MAN(metropolitan)等标准。IP层管理传输中的路径，TCP或UDP层完成实际的数据传输。IP层本身对数据的传输是不可靠的，数据包有可能不按顺序抵达，或有丢失和损毁。TCP层负责重新封装数据、校验数据完整性、有必要则重新传送部分数据。在最上层的应用层就是套接字，该层的协议的应用是网络编程的主要内容，对低层TCP和IP协议的调用都已经包含其中。
+
+###服务器端流程
+
+基于TCP的服务器端套接字创建和数据传输过程调用如下函数：
+```
+socket()	创建套接字
+bind()		分配套接字地址
+listen()	等待连接请求
+accept()	接受连接请求
+read()/write()	读写数据
+close()		断开连接
+```
+之前的部分已经介绍了创建套接字和分配地址的`socket()`和`bind()`函数，以下介绍剩余部分的函数。具体可以结合参考`hello_server.c`中的实际代码阅读以下的各个函数说明部分。
+
+等待连接请求
+在服务器端为套接字分配了地址后，调用`listen()`函数进入等待连接请求的状态，之后客户端才可以调用`connect()`函数发出连接请求，如果提前调用会发生客户端错误。`listen()`函数的调用方法如下：
+```
+#include <sys/socket.h>
+int listen(int sock, int backlog); 
+```
+* 以上函数成功返回0，失败返回-1。
+* sock：需要等待连接请求的服务器端套接字文件描述符
+* backlog：连接请求队列长度
+
+接受连接请求
+等待连接请求和接受连接请求需要不同的套接字来完成，可以理解为保安和收发室的各司其职的关系。这里接受套接字使用的函数`accept()`可以自动创建套接字并连接到发起请求的客户端。
+```
+#include <sys/socket.h>
+int accept(int sock, struct sockaddr * adds, socklen_t * addrlen);
+```
+* 该函数成功返回创建的套接字文件描述符，失败时返回-1
+* sock：服务器套接字的文件描述符
+* addr：保存发起连接请求的客户端地址信息
+* addrlen：客户端地址的结构型数据长度
+这里需要说明一下，因为该`accept()`函数的参数与`bind()`函数相同，但意义有所不同。`bind()`函数读入的第二个和第三个参数是本地配置好的服务器地址信息，是需要做读取操作的对象，用于应用到服务器套接字上。而`accept()`函数的第二个和第三个参数是用来存放接受客户端请求后拿到的客户端的地址信息，是需要做保存操作的对象。
+
+读写数据和关闭连接
+这里使用写数据作为示例，调用方法如下：
+```
+int write(int sock, char* msg, int msg_len);
+close(int sock)
+```
+* `write()`函数成功返回写入的字符数，失败返回-1
+* sock：之前由`accept()`函数创建的服务器端套接字
+* msg：需要传输的字符串
+* msg_len：需要传输的字符串长度
+
+###客户端流程
+
+基于TCP的客户端套接字创建和数据传输过程调用如下函数：
+```
+socket()	创建套接字
+connect()	请求连接
+read()/write()	读写数据
+close()		断开连接
+```
+相对服务器端，客户端的操作相对简单，主要是使用`connect()`函数发起连接请求。对于以下函数说明可以结合`hello_client.c`文件中的具体代码以加深理解。
+```
+#include <sys/socket.h>
+int connect(int sock, struct sockaddr* servaddr, socklen_t addrlen);
+```
+* 以上函数成功返回0，失败返回-1
+* sock：客户端套接字文件描述符
+* servaddr：保存服务器端地址信息的结构型变量
+* addrlen：服务器端地址信息的长度
+与服务器端的`accept()`函数类似，第二和第三个参数分别用户保存接受到的连接对方，这里也就是服务器端，的地址信息及其长度。在`connect()`函数调用后，只有服务器端接受连接请求或因为断网等原因中断了连接请求时才会返回，受到连接请求队列长度的限制，服务器端可能不会立即调用`accept()`函数而是把请求放入等待队列。其他函数`read()`和`close()`与服务器方面的类似，这里不再赘述。
+
+###回声服务器
+
+目前的`hello_server.c`服务器程序返回固定的字符串，功能过于简单。这里更新代码强化其功能，接受客户端发来的信息并返回，流程如下：
+* 服务器连接客户端
+* 客户端接受用户输入并发送到服务器
+* 服务器接受客户端传输的数据并原样返回客户端
+* 服务器保持连接直到客户端输入`Q`
+这里需要注意的是，服务器在同一时间只能接受一个客户端的连接请求，且服务器对每个连接可以响应五个请求，之后就会退出。
+
+更新后另存服务器程序文件为`echo_server.c`，主要更新的代码部分如下：
+```
+    // 在每次服务器活动期间，可接受五次来自客户端的连接请求
+    for(i=0; i<5; i++)
+    {
+        // 接受客户端的连接亲求，并创建用于数据传输的服务器端套接字
+        clnt_sock=accept(serv_sock, (struct sockaddr*) &clnt_addr, &clnt_addr_size);
+        if(clnt_sock==-1)
+            error_handling("accept() error!");
+        else
+            printf("Connected client %d \n", i+1);
+
+        // 读入客户端发送的信息并原样返回
+        while((str_len=read(clnt_sock, message, BUF_SIZE))!=0)
+            write(clnt_sock, message, str_len);
+        
+        close(clnt_sock);
+    }
+```
+
+更新客户端程序文件并另存为，主要更新部分如下：
+```
+    if(connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr))==-1)
+        error_handling("connect() error!");
+    else
+        // 在套接字连接接受后，显示连接成功的消息
+        puts("Connected......");
+
+    while(1)
+    {
+        // 注意这里使用的`fputs()`和`fgets()`函数
+        // 分别向标准输出打印信息和从标准输入读取信息
+        fputs("Input message(Q to quit): ", stdout);
+        fgets(message, BUF_SIZE, stdin);
+
+        // 在用户输入大小写Q之后终止运行
+        if(!strcmp(message, "q\n") || !strcmp(message, "Q\n"))
+            break;
+        
+        // 将用户的输入写入与服务器连接的套接字再读取和打印服务器的回声
+        write(sock, message, strlen(message));
+        str_len=read(sock, message, BUF_SIZE-1);
+        if(str_len==-1)
+            error_handling("read() error!");
+        // 在读取的服务器回声信息末尾添加休止符`0`
+        message[str_len]=0;
+        printf("Message from server : %s \n", message);
+    }
+    close(sock);
+```
+
+编译服务器与客户端代码并运行查看结果：
+```
+$ gcc 11_echo_server.c -o eserver
+$ ./eserver 9091
+Connected client 1 
+Connected client 2 
+Connected client 3
+```
+以上每个连接的客户端表示一次打开又关闭的套接字，即客户端请求连接、成功连接、按下Q或q终止连接。直到先后服务五个客户端，服务器会一直工作，在服务满五个客户端后终止运行。
+
+注意服务器端运行后就无法继续操作终端，客户端需要在独立终端中分别运行：
+```
+$ gcc 12_echo_client.c -o eclient
+$ ./eclient 127.0.0.1 9091
+Connected......
+Input message(Q to quit): Good morning
+Message from server : Good morning
+```
+连接建立后，客户端用户可以一直输入并得到来自服务器的回声反馈，直到按下Q或q终止程序的执行。在服务器终止运行之前，用户可以发起和终止五次基于套接字的数据传输。之后需要重新运行服务器端程序，才能再建立连接。
+
+理论上，以上代码存在问题隐患。即由于采用TCP方式连接，基于TCP传输的数据无边界的特性，客户端发送的多个字符串可能因为同时抵达服务器而被当作一个字符串，或者服务器端会将大的数据拆分成多个数据包返回客户端，结果时客户端收到的服务器回声可能包含多个原始字符串或某个原始字符串的片段。当服务器与客户端都在本地电脑，且测试字符串较小时不会发生，但仍然是一个技术隐患，需要在后面做出改善和解决。
