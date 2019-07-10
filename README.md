@@ -575,3 +575,89 @@ TCP使用双全工方式工作，可以同时发送和接收数据，在实际�
 备注 - 关于指针
 
 与其他高级语言相比，C语言可以更高效的对计算机内存物理地址做指针操作。计算机内存中的单元以字节计算，每个内存单元有独立的编号，指向内存单元地址的标记就叫做指针。指针变量保存的是对象的地址值，例如整型指针变量，只能保存整形变量的地址。不论变量的基本类型如何，相应的指针变量只能保存其地址，而不能保存其实际值。
+
+## UDP的S/C
+
+UDP在通讯方式上比TCP更简洁，不会发送ACK应答信息或给数据包分配SEQ序号，因此性能更高，编程的实现方法也更简单。在数据流量和传输通道质量控制方面，TCP更有优势，但效率时UDP的优势。一般来说，TCP的速度无法超过UDP，在发送某些数据或者单次交换的数据量越大的时候，TCP的传输速率就越接近UDP。
+
+在应用场景上，如果是传输压缩文件，文件的完整性就十分重要，需要保证所有数据包的正确接收，否则无法完成接压缩，此时就需要用TCP协议传输。如果是实时通讯，为传输多媒体数据，速度就称为相对更为重要的因素，需要使用UDP。TCP并不是总是慢于UDP，收到的影响因素包括在收发数据前后进行的链接设置和中断过程，以及在数据收发过程中为保证可靠性尔添加的流控。因此，如果收发的数据量小且需要频繁连接是，UDP就更高效。
+
+### UDP通讯测试
+
+UDP的通讯不基于连接， 也就是其套接字不需要调用`listen()`或`accept()`函数，只需要创建套接字和交换数据。另外，同样由于不基于连接，服务器和客户端的UDP套接字也不必一一对应，双方只要有一个UDP套接字就可以在多台主机之间进行UDP通讯。没有基础连接也有缺点，UDP套接字不知道通讯对方的地址信息，需要在每次数据交换的函数中指定：
+```
+#include <sys/socket.h>
+ssize_t sendto(int sock, void *buff, size_t nbytes, int flags, 
+		struct sockaddr *to, socklen_t addrlen);
+```
+* 以上函数成功时返回传输的字节数，失败时返回-1
+* 参数sock	用于传输数据的UDP套接字文件描述符
+* 参数buff	保存待传输的数据的缓冲地址值
+* 参数nbytes	待传输的数据长度，以字节为单位
+* 参数flags	可选参数，没有设定则传输0
+* 参数to		保存有目标地址的结构变量的地址
+* 参数addrlen	传递给to参数的地址值的结构体变量长度
+
+在接收UDP数据时，由于UDP的发送端不固定，接收函数可以接收发送端信息：
+```
+#include <sys/socket.h>
+ssize_t recvfrom(int sock, void *buff, size_t nbytes, int flats,
+		struct sockaddr *from, socklen_t *addrlen);
+```
+* 以上函数成功返回接收的字节数，失败返回-1
+* 参数sock	接收数据的UDP套接字的文件描述符
+* 参数buff	保存接收数据的缓冲地址
+* 参数nbytes	可接受的最大字节数，无法超过参数buff指定的大小
+* 参数flags	可选参数，没有则传入0
+* 参数from	存有发送端地址信息的结构体变量的地址
+* 参数addrlen	保存参数from的结构体变量长度的变量地址
+
+编译和运行服务器与客户端程序，程序见文档库中的文件，测试结果如下：
+```
+// 在一个终端中运行服务器程序
+$ gcc 16_uecho_server.c -o userver
+$ ./userver 9190
+// 在另一个终端中运行客户端程序
+$ gcc 17_uecho_client.c -o uclient
+$ ./uclient 127.0.0.1 9190
+Insert message(q to quit): HI UDP Server
+Message from server: HI UDP Server
+Insert message(q to quit): Nice to meet you!
+Message from server: Nice to meet you!
+Insert message(q to quit): Good bye~~
+Message from server: Good bye~~
+Insert message(q to quit): q
+```
+
+### 数据边界
+
+TCP的数据传输不存在数据边界，结果就是数据传输中调用I/O函数的次数没有意义。相反，UDP的数据传输存在数据边界，调用I/O函数的次数也就非常重要。具体来说，发送和接收数据的次数必须完全一致才能保证接收全部已经发送的数据。这里创建和编译两个数据传输程序用于测试数据边界。
+```
+// 在一个终端上运行hostA
+$ gcc 18_bound_hostA.c -o hosta
+$ ./hosta 9190
+Message 1: Hi! 
+Message 2: I'm another UDP host! 
+Message 3: Nice to meet you! 
+// 在另一个终端上运行hostB
+$ gcc 19_bound_hostB.c -o hostb
+$ ./hostb 127.0.0.1 9190
+```
+
+以上程序中，hostB是一次性发出的三条信息，hostA在每次调用接收信息的函数间延时了5秒。如果是TCP方式传输，接收信息的函数只用调用一次就可以读取到之前发送的三条信息，因为TCP方式下不存在数据边界。但实在UDP方式下，读取信息的函数需要与发送信息的函数成对出现，所以虽然发送来的信息有足够时间存入缓存，读取的时候还是要匹配发送次数调用函数三次。
+
+### 带连接的UDP
+
+默认的UDP套接字连接每次传输数据前注册目标IP和端口号，传输数据之后注销IP和端口号，这两个操作发生在正式传输数据的前后，会占据整个通信时间的三分之一。对于与同一主机的长时间通讯，UDP也支持带连接的数据通信，使用`connect()`函数建立连接即可，相应的发送和接收数据的方法也由`write()`和`read()`代替了`sendto()`和`recvfrom()`。这里也更新了UDP客户端程序并验证如下，实际效果与原有程序相同，但执行效率会更高：
+```
+// 在一个终端中运行服务器程序
+$ ./userver 9190
+// 在另一个终端中运行更新的客户端程序
+$ gcc 20_uecho_con_client.c -o ucclient
+$ ./ucclient 127.0.0.1 9190
+Insert message(q to quit): UDP with connection
+Message from server: UDP with connection
+Insert message(q to quit): it works as well
+Message from server: it works as well
+Insert message(q to quit): q
+```
