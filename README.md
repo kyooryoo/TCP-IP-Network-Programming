@@ -661,3 +661,67 @@ Insert message(q to quit): it works as well
 Message from server: it works as well
 Insert message(q to quit): q
 ```
+
+## 断开套接字连接
+
+相对建立套接字连接，断开的过程可能出现更多变数，而使用Linux下的`close()`或Windows下的`closesocket()`函数断开套接字其实是一种相对暴力的强行断开方式，本节会介绍半关闭的概念，以明确具体的连接断开过程。回顾之前提到的发送和接收信息的缓冲操作，任何发送或接收放单方使用全中断方式关闭连接是不稳妥的，因为可能存在缓冲数据，特别在没有处理好数据边界的问题时，对方缓冲的发送数据即本方待接收数据的丢失。
+
+这里引入Stream，即所谓数据流，的概念。在固定连接的方式下，通讯双方中一方的`read()`和另一方的`write()`是成对存在的，构成一个数据流，而一般会有两个不同方向的流同时存在于通讯双方的主机之间。之前介绍的关闭函数会关闭整个套接字的所有通信，也就是同时切断了两个方向的数据流，这里介绍一个半关闭函数，只关闭指定方向的数据流，保留另一方向开放：
+```
+#include <sys/socket.h>
+int shutdown(int sock, int howto); 
+```
+* 以上函数成功返回0，失败返回-1
+* sock	需要做断开操作的套接字文件描述符
+* howto	连接断开的方式
+* -> SHUT_RD	断开输入流同时清除输入缓存
+* -> SHUT_WR	断开输出流但不会清除输出缓存
+* -> SHUT_RDWR	同时断开输入输出流
+
+一个使用了半关闭函数的数据交换流程如下：
+1. 客户端向服务器请求连接
+2. 服务器发送数据到客户端
+3. 服务器发送EOF的文件结尾标志，半关闭通讯连接
+4. 客户端返回服务器确认接收结束
+
+这里编写了两个小程序用于测试服务器端和客户端对半连接的应用：
+```
+// 在一个终端中运行服务器程序
+$ gcc 21_file_server.c -o fserver
+$ ./fserver 9190
+// 在客户端程序运行结束后，服务器端收到如下结果
+Message from client: Thank you! 
+// 在另一个终端中运行客户端，确认接收到了文件
+$ gcc 22_file_client.c -o fclient
+$ ./fclient 127.0.0.1 9190
+Received file data!
+// 确认接受到的保存了服务器源代码的文件
+$ head -n 4 22_receive.dat 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+```
+
+具体的程序代码和注释可以参考地21和第22个程序文件，有一个地方需要强调：
+```
+    puts("Received file data!");
+    // 发送最后的提示消息，如果服务器端未关闭输入流则可以接收
+    // 以下的第三个参数原文用的是`10`，会造成服务器端接收到多余字符
+    // 修改为`BUF_SIZE`可以修正此问题
+    write(sock, "Thank you!", BUF_SIZE);
+    fclose(fp);
+    close(sock);
+    return 0;
+```
+在返回服务器信息以测试半连接时，使用`BUF_SIZE`代替原书中使用的`10`可以清除服务器端接收的多余信息。
+
+其他部分的代码没有特别只处，只是在服务器端的如下代码涉及到了半连接：
+```
+    // 发送文件后对输出流半关闭，即向客户端发送了EOF
+    shutdown(clnt_sock, SHUT_WR);
+    // 关闭输出流后，依然可以接收数据
+    read(clnt_sock, buf, BUF_SIZE);
+    printf("Message from client: %s \n", buf);
+```
+在服务器使用半连接关闭了发送信息后依然可以接受信息，在后面接收到客户端发送的`Thank you`后即完成了验证。

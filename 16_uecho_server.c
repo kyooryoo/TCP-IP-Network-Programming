@@ -1,4 +1,4 @@
-// 回声测试的UDP客户端
+// 回声测试的UDP服务器
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
