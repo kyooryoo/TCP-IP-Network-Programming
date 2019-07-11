@@ -725,3 +725,57 @@ $ head -n 4 22_receive.dat
     printf("Message from client: %s \n", buf);
 ```
 在服务器使用半连接关闭了发送信息后依然可以接受信息，在后面接收到客户端发送的`Thank you`后即完成了验证。
+
+## 域名和网址
+
+域名系统（DNS Domain Name System）负责对应相对直观和容易理解的域名到IP地址，网络上的域名服务器使用层级结构提供域名到IP地址的查询服务。如果需要查询某个域名对应的IP地址，可以使用`ping`或者`nslookup`命令，接域名地址。在程序中使用域名可以避免把IP地址，特别是某些服务器的IP地址，硬编码到程序中，也就不必在IP地址更新时更新程序。
+
+使用如下函数获取某个域名的IP地址：
+```
+#include <netdb.h>
+Struct hostent * gethostbyname(const char * hostname);
+```
+* 以上函数成功返回hostent类的结构类型地址信息，失败时返回NULL指针
+* hostent结构体的定义如下
+```
+struct hostent
+{
+    char * h_name;	//主机名称-官方域名
+    char ** h_aliases;	//别名列表-其他域名
+    int h_addrtype;	//地址类型-IPv4地址返回AF-INET
+    int h_length;	//地址长度-IPv4地址返回4（个字节）
+    char ** h_addr_list;//地址列表-可能返回多个地址
+}   
+```
+
+这里编写一个程序，代号23，说明函数`gethostbyname`的应用方式和`hostent`结构体中保存的地址信息：
+```
+$ gcc 23_gethostbyname.c -o hostname
+IP addr 1: 104.75.164.236 
+$ ./hostname www.google.com
+Official name: www.google.com 
+Address type: AF_INET 
+IP addr 1: 172.217.24.36 
+```
+
+反向的操作也可以通过函数实现，即通过IP地址获取域名：
+```
+#include <netdb.h>
+struct hostent * gethostbyaddr(const char * addr, socklen_t Len, int family); 
+```
+* 以上函数成功返回hostent结构类型的地址，失败时返回NULL指针
+* addr	含有地址信息的in_addr结构类型指针。为传递IPv4地址以外的信息，声明变量为char类型指针
+* len	向第一个参数传递的地址信息的字节数，IPv4时为4，IPv6时为16
+* family传递地址族信息，IPv4时为AF_INET，IPv6时为AF_INET6
+
+这里也编写一个小程序，代号24，说明`gethostbyaddr`函数的应用方式：
+```
+$ gcc 24_gethostbyaddr.c -o hostaddr
+$ ./hostaddr 172.217.24.36
+Official name: hkg07s23-in-f4.1e100.net 
+Aliases 1: 36.24.217.172.in-addr.arpa 
+Aliases 2: hkg07s23-in-f36.1e100.net 
+Address type: AF_INET 
+IP addr 1: 172.217.24.36 
+```
+程序源码可以参考代码文档库中的文件。这里可以看到从IP到域名的反向查找有时并不能得到有用信息，从域名解析IP查到的谷歌IP地址在反向查找时并没有指向带有谷歌域名的地址。
