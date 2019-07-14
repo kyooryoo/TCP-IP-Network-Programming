@@ -779,3 +779,130 @@ Address type: AF_INET
 IP addr 1: 172.217.24.36 
 ```
 程序源码可以参考代码文档库中的文件。这里可以看到从IP到域名的反向查找有时并不能得到有用信息，从域名解析IP查到的谷歌IP地址在反向查找时并没有指向带有谷歌域名的地址。
+
+## 套接字选项
+
+套接字有一些可选项，在IP、TCP和UDP层分别可以做出不同的设置。可以使用`getsockopt()`和`setsockopt()`函数来读取和设置套接字可选项。
+
+在不同协议层（`SOL_SOCKET`,`IPPROTO_IP`和`IPPROTO_TCP`）上有不同的选项可以查看和定义。这里给出一个小程序查看和修改相关选项，部分选项在后面有说明。
+```
+#include <sys/socket.h>
+int getsockopt(int sock, int level, int optname, void *optval, socklen_t *optlen);
+int setsockopt(int sock, int level, int optname, const void *optval, socklen_t optlen); 
+```
+* 以上函数成功返回0，失败返回-1
+* sock		查看或更改选型的目标套接字文件描述符
+* level		查看或更改的可选项所属协议层
+* optname	查看或更改的可选项名称
+* optval	查看或更改的可选项值
+* optlen	向可选项值传递的缓冲大小
+
+这里写一个小程序，代号25，检验默认的的TCP和UDP套接字选项值和充置后的值：
+```
+$ gcc 25_getset_sock.c -o gssock
+$ ./gssock 
+The setting value used in configuration:
+SOCK_STREAM: 1 
+SOCK_DGRAM: 2 
+The real default value in new Sockets:
+Socket type TCP: 1 
+Socket type UDP: 2 
+Send buffer TCP: 131072 
+Send buffer UDP: 9216 
+Send buffer TCP after reset: 3072 
+Send buffer UDP after reset: 3072 
+Receive buffer TCP: 131072 
+Receive buffer UDP: 786896 
+Receive buffer TCP after reset: 3072 
+Receive buffer UDP after reset: 3072 
+Reuse addr TCP: 0 
+Reuse addr UDP: 0 
+Keep alive TCP: 0 
+Keep alive UDP: 0 
+Broadcast TCP: 0 
+Broadcast UDP: 0 
+Do not route TCP: 0 
+Do Not Route UDP: 0 
+OOB inline TCP: 0 
+OOB inline UDP: 0 
+ERROR TCP: 0 
+ERROR UDP: 0 
+IP TOS TCP: 0 
+IP TOS UDP: 0 
+IP TTL TCP: 64 
+IP TTL UDP: 64 
+state of getsockopt() for IP_MULTICAST_TTL in TCP is: -1 
+IP Multicast TTL TCP: 107589632 
+IP Multicast TTL UDP: 1 
+state of getsockopt() for IP_MULTICAST_LOOP in TCP is: -1 
+IP Multicast Loop TCP: 32766 
+IP Multicast Loop UDP: 1 
+state of getsockopt() for IP_MULTICAST_IF in TCP is: -1 
+IP Multicast If TCP: -380221720 
+IP Multicast If UDP: 0 
+Keep Alive TCP: 7200 
+When no-delay (Nagle) is off for TCP: 4 
+Max Seg TCP: 512 
+```
+通过以上程序可以看到，设置参数的实际值和相应套接字的属性值都是一样的`1`和`2`。而其他设置值中除了缓冲设置值外大部分默认为0。
+
+### 服务器端口重用
+
+这里关于`SO_REUSEADDR`选项稍作解释。在默认设置下，服务器端在程序强制终止后并没有完全杀死进程，会有一个默认为几分钟的后台存活和等待时间，这样的默认设置导致服务器端在意外或强制的程序终止后无法立即重启，生产环境下可能影响服务可用性。这样的设计是基于套接字终止的四次握手机制：
+方向	握手类型	信息内容
+S->C	FIN	SEQ 5000 / ACK -
+C->S	ACK	SEQ 7500 / ACK 5001
+C->S	FIN	SEQ 7501 / ACK 5001
+S->C	ACK	SEQ 5001 / ACK 7502
+在四次握手机制中，如果是客户端先发出FIN握手，也同样会触发等待时间，但由于客户端生成的套接字选用随机端口，每次生成的端口都不同，所以不同担心无法重启客户端程序问题。如果服务器端需要在意外的程序终止后立即重用端口，可以设置改选项为真（即整型的值1，默认为0）。这里做了一个小程序，代码26，基于之前的回声服务器修改而成。
+```
+// 在源代码中注释掉新添加的用于打开端口重用的代码
+$ gcc 26_reuseaddr_echo_server.c -o reserver
+$ ./reserver 9091
+Connected client 1 
+hello
+^C
+$ ./reserver 9091
+bind() error!
+// 重新启用打开服务器端端口重用的代码，再次运行
+$ ./reserver 9091
+Connected client 1 
+hello
+^C
+$ ./reserver 9091
+Connected client 1 
+hello again
+// 以下为客户端在另一个终端的运行状况
+$ ./eclient 127.0.0.1 9091
+Connected......
+Input message(Q to quit): hello
+Message from server : hello
+ 
+Input message(Q to quit): ^C
+$ ./eclient 127.0.0.1 9091
+Connected......
+Input message(Q to quit): hello again
+Message from server : hello again
+ 
+Input message(Q to quit): q
+```
+
+### `Nagle`算法
+
+关于可选项设置，再介绍一个`Nagle`算法的概念。该算法在1984年诞生，用于优化TCP层的网络传输效率，默认为打开状态。在打开状态，系统会等待数据填满一个数据包再发送，在关闭状态，系统只要发现缓存中有数据就立即发送，且不用等待前一个数据包返回的ACK确认信息。
+
+在早期网络带宽较窄时，启用该算法可以避免发送数据包的包头等对最终用户无效的数据，的确可以改善网络效率。但现在网络的带宽很高，将数据写入输出缓冲不会用太多时间，有时需要传输大文件，或不必等待每个前数据包的ACK再发送下个数据包，此时关闭`Nagle`算法就可以提高传输速度。
+```
+// 以下代码通过修改`tcp_nodelay`的可选项值关闭`Nagle`算法
+int opt_val=1; 
+setsockopt(tcp_sock, IPPROTO_TCP, TCP_NODELAY, (void*)&opt_val, sizeof(opt_val));
+// 查看`tcp_nodelay`可选项的设置值
+int tcp_nodelay;
+socklen_t opt_len;
+opt_len=sizeof(opt_val)
+state=getsockopt(tcp_sock, IPPROTO_TCP, TCP_NODELAY, (void*)&tcp_nodelay, &optlen);
+if(state)
+    error_handling("getsockopt() error!");
+printf("When no-delay (Nagle) is off for TCP: %d \n", tcp_nodelay);
+```
+以上代码已经包含在代号为25的小程序中，可以查看和设置相关的套接字可选项。
