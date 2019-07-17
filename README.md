@@ -906,3 +906,259 @@ if(state)
 printf("When no-delay (Nagle) is off for TCP: %d \n", tcp_nodelay);
 ```
 以上代码已经包含在代号为25的小程序中，可以查看和设置相关的套接字可选项。
+
+## 多进程服务器
+
+如果无法支持多个客户端的并发访问，或者对后连接的客户端无法提供与第一个发起连接的客户端同样的服务水平，客户满意度都会收到影响。这里有三个办法构建可以处理并发请求的服务器端：多进程，多路复用（捆绑并统一管理I/O对象），多线程。本部分讨论多进程的实现方法，该方法在Windows平台上因为不支持而无法实现。
+
+进程（Process）是程序流的基本单位，独立占用内存和计算资源，不同程序会创建各自进程，同一个程序也可创建多个进程，操作系统可以运行多个进程。多核CPU可以真正同时运行与核数相同的进程，更多进程需同时运行要分时共享CPU资源以达到使用户体验为同时运行的目的。在终端中运行命令`ps au`可以查看所有正在运行的进程详情。
+
+### 复制进程
+
+创建进程的方法不止一种，创建多进程服务器端使用`fork()`函数。该函数创建当前父进程的副本子进程，子进程与父进程同时运行服务器端的程序，函数返回子进程ID的为父进程，返回0的为子进程，如果创建子进程失败则返回-1。以下用一个小程序演示创建进程副本的过程：
+```
+$ gcc 27_fork.c -o fork
+$ ./fork
+Original Val: [10 20]
+Before Process: [11 25]
+Parent Proc: [9 23]
+Child Proc: [13 27]
+```
+以上程序的源码可以参考代号27的c文件。从结果可以得到一个有趣的猜测，在创建子进程后，父进程依旧是先运行。源码中使用`if`判别式做了父子进程不同结果的输出设计，如果程序只运行一遍则只会得到一个结果，同时得到两个结果表明父子进程都执行了程序。
+
+### 僵尸进程
+
+进程完成工作后需要调用`exit()`函数或在该进程所运行的`main()`函数中执行`return`语句并返回值。对于子进程，需要父进程传递子进程的`exit（）`函数参数或`return`语句的返回值。这里也创建一个小程序演示僵尸进程的情况：
+```
+$ gcc 28_zombie.c -o zombie
+$ ./zombie
+parent process working!
+child process ID: 39305
+child process working!
+End of child process!
+End of parent process!
+```
+程序的源码可以参考代号为28的c文件，程序的运行逻辑在文件注释中也有，即父进程先运行然后进入等待，接着子进程运行并宣布结束，但实际上子进程并没有真正的结束，因为父进程还在等待超时，主程序中的`return`命令还没有触发，此时可以在另一个终端中运行`ps au`命令查看到有两个名称为`zombie`的存活进程。直到父进程也宣布结束，即主程序的`return`命令触发后父子进程才真正的结束，同样可以通过运行`ps au`命令确认。
+
+### 后台运行
+
+在程序运行中查看后台进程，这样的需求需要打开额外的终端，有些麻烦。如果将之前的程序放到后台运行，当前的终端就可以继续操作，这里演示如下：
+```
+// 在终端命令后加入`&`以放置该命令到后台去运行
+$ ./zombie &
+[1] 40090
+$ parent process working!
+child process ID: 40091
+child process working!
+End of child process!
+// 程序在这里暂停，输入以下命令可以查看进程列表
+ps au
+...
+// 父进程超时后，程序正式结束
+$ End of parent process!
+```
+
+### 销毁子进程
+
+要销毁子进程，从子进程中调用`return`方法返回值是没有用的，因为子进程的设计初衷之一就是要返回值给父进程，如果没有确认父进程得到返回值就销毁，设计的任务等于没有完成。销毁子进程有两种方法，这里先看使用`wait()`函数的方法：
+```
+#include <sys/wait.h>
+pid_t wait(int * statloc);
+```
+* 该函数在成功时返回终止的子进程ID，失败时返回-1
+
+该函数在终止子进程的同时，保存子进程相关信息到其参数所对应的内存空间,可以用如下宏命令处理：
+* WIFEXITED	Wait If Exited		子进程正常终止则返回true
+* WEXITSTATUS	Wait Exit Status	返回子进程的返回值
+
+这里同样编写一个小程序，代号29，测试`wait()`函数和其参数的返回值：
+```
+$ gcc 29_wait.c -o wait
+$ ./wait
+child PID: 61075
+child PID: 61076
+child exit one: 3
+child exit one: 7
+// 这里程序会等待30秒，其间可以查看进程状况，确认子进程已经销毁
+$
+```
+在同上程序中，可以注释掉包括`wait()`函数及查看其返回值的语句，再次运行程序并查看进程，可以发现有两个名称为`(wait)`的子进程在运行，直到父进程超时后才被销毁。这里有一个问题需要提醒注意，就是调用`wait()`函数时系统中需要的确有子进程在运行，如果没有的话程序会停留在这里等待直到有子进程可以操作，因此需要谨慎调用该函数。
+
+销毁子进程的另一个方法是`waitpid()`函数：
+```
+#include <sys/wait.h>
+pid_t waitpid(pid_t pid, int * statloc, int options);
+```
+* 该函数成功时返回终止的子进程ID或0，失败时返回-1
+* pid: 等待被终止的目标子进程ID。如果传递-1，则与`wait()`函数相同，等待任意子进程被终止
+* statloc: 保存被终止的子进程状态的内存地址
+* options: 传递头文件sys/wait.h中声明的常量WNOHANG，没有需要终止的子进程则返回0并退出函数
+
+这里同样编写一个小程序，代号30，验证`waitpid()`函数的功能：
+```
+$ gcc 30_waitpid.c -o waitpid
+$ ./waitpid 
+waitpid sleeps 3sec.
+waitpid sleeps 3sec.
+waitpid sleeps 3sec.
+waitpid sleeps 3sec.
+waitpid sleeps 3sec.
+child exit: 24
+```
+从以上的程序执行结果可以看出，函数`waitpid()`在等待期间不会因为没有子程序可销毁而暂停整个程序的执行，反复的尝试不会对程序的正常运行有任何影响。如果是`wait()`函数就会导致程序死锁在等待阶段，直到子程序超时。在代号30的小程序源码中也在`waitpid()`函数附近保留了一条处于注释状态的`wait()`函数语句，可以注销前者反注销后者运行：
+```
+$ gcc 30_waitpid.c -o waitpid
+$ ./waitpid 
+child exit: 24
+```
+可以看到包含了`wait()`函数的`while`判别式一次也没有执行，因为`wait()`函数从一开始就处于等待状态，直到成功执行一次后返回子进程ID，在`!`操作符下判别为`false`，故一次也没有执行。
+
+### 信号处理
+
+以上终止或销毁子进程的两种方法都需要父进程的监护，操作系统如果可以帮忙将子进程的运行状况通知到父进程可以提高程序运行效率。这里提到的信号处理也叫做信号注册，就是让操作系统在特定事件发生时调用特定函数，方法为`signal()`函数：
+```
+#include <signal.h>
+void (*signal(int signo, void (*func)(int)))(int); 
+```
+* signo: 触发信号的特殊事件信息，可以包含如下几种情况：
+* -> SIGALRM: 等待`alarm`函数超时
+* -> SIGINT: 输入CTRL+C
+* -> SIGCHLD: 子程序终止
+* (*func)(int): 特殊事件发生时需要调用的函数地址值（指针）
+* -> 该函数的参数值需要为整型，返回值类型需要为空
+
+因为`signo`参数涉及到`alarm()`函数，这里对此介绍如下：
+```
+#include <unistd.h>
+unsigned int alarm(unsigned int seconds);
+```
+* 以上函数返回0或到SIGALARM信号发生为止的剩余秒数。
+* seconds: 正值整数，定义发送信号的剩余时间。如果是0则取消发送信号。
+* 该函数超时后发出的信号如果没有被`signal()`捕捉，则不做任何处理。
+
+这里也用一个小程序，代号31，来演示`signal()`函数的处理过程：
+```
+$ gcc 31_signal.c -o signal
+$ ./signal 
+wait...Time out!
+wait...Time out!
+wait...Time out!
+$ ./signal 
+wait...Time out!
+^Cwait...CTRL+C pressed!
+wait...Time out!
+```
+编译后，第一次运行不做特殊操作，程序自动超时三次。第二次在第二次超时前按下`CTRL+C`可以被程序捕捉到，另外两次依旧自动超时。对于默认情况下的执行过程解释如下：
+1. 注册两个信号处理器，默认情况下只触发SIGALRM信号
+2. 准备一个2秒后发出的ALARM信号
+3. 进入第一次循环，打印关于等待的通知文字
+4. 进入100秒的超时等待时间
+5. 之前准备的ALARM信号达到2秒超时，触发ALARM信号
+6. ALARM信号触发timeout函数的运行
+7. 打印超时通知文字，同时再准备一个2秒后发出的ALARM信号
+8. 进入第二次循环，重复之前的3到7步两次
+由于每次循环内的100秒等待命令之前都有一个准备好的2秒超时后的ALARM信号，而每次任意信号的触发都会中止系统的等待，因此无论是默认的每2秒触发的ALARM信号还是手动按下的`CTRL+C`都会终结系统的100秒等待。
+
+不同系列的UNIX系统中`signal()`函数的执行方式可能存在细微差别，但`sigaction()`函数执行方式完全相同，因此后者也更稳定：
+```
+#include <signal.h>
+int sigaction(int signo, const struct sigaction * act, struct sigaction * oldact);
+```
+* 成功返回0，失败返回-1
+* signo：传递信号信息
+* act：对应第一个参数的信号处理函数
+* oldact：之前注册的信号处理函数指针，没有则设置为0
+
+结构类型`sigaction`的结构体定义如下：
+```
+struct sigaction
+{
+    void (*sa_handler)(int);
+    sigset_t sa_mask;
+    int sa_flags; 
+}
+```
+以上结构类型定义中，`sa_handler`保存信号处理函数的指针，`sa_mask`和`sa_flags`指定信号相关的选项和特性，由于这里只讨论如何终止僵尸进程，后两者设置为0即可。这里也编写了小程序，代号32，验证`sigaction()`函数作用：
+```
+$ gcc 32_sigaction.c -o sigaction
+$ ./sigaction 
+wait...
+Time out!
+wait...
+Time out!
+wait...
+Time out!
+```
+实现的功能与之前类似，具体执行过程逻辑也类似，这里不再解释，有必要可看源码32号c文件及其注释。
+
+应用以上的函数功能到服务器程序的僵尸进程清理，这里参照程序代号33:
+```
+$ gcc 33_remove_zombie.c -o remove_zombie
+$ ./remove_zombie 
+Child proc id: 95356 
+Subchild proc id: 95357 
+wait 5sec!
+This is child process!
+This is subchild process!
+wait 5sec!
+Removed proc id: 95357 
+child send: 24 
+Removed proc id: 95356 
+child send: 12 
+wait 5sec!
+wait 5sec!
+wait 5sec!
+```
+具体的源码可以参考33号c文件，没有注释因为所有内容都在前述中解释过。简单的再说明，就是在子进程通过`return`或`exit`命令完成任务后并没有完全退出自己，而是处在等待状态。此时通过`sigaction`函数的`SIGCHLD`参数发送信号给系统调用`read_childproc`方法，其中通过`waitpid`正式终止子进程并返回子进程信息。在主程序中，外层父进程只打印外层子进程的ID，内层父进程除了打印内层子进程ID外还会运行一个5秒的等待命令5次，其间内层和外层子进程各自的10秒等待时间会在内层父进程结束前完成超时和退出，被`sigaction`函数捕捉进而被`waitpid`销毁。
+
+这里再说明比较有趣的内容。第一是虽然有内外两层子进程，但其执行顺序并没有先后关系而是平行关系，也就是两个子进程中的等待时间会同时超时而不是在中间再等待10秒。第二是具体执行程序得到的结果与原书中的不同，主要是等待5秒的提示文字出现顺序不同，且每次运行该程序都会略有不同。从结果来看，原书中子进程中的命令先执行，而我的结果中总是父进程的命令先执行。
+
+### 并发服务器
+
+通过创建子进程，服务器可以真正的处理并发请求。父进程通过调用`accept`函数受理连接请求，获得客户端的套接字文件并传递给`fork`函数复制出的子进程，子进程提供服务并在服务结束后销毁。这里用程序代号34验证：
+```
+// 在第一个终端中运行服务器程序
+$ ./mpserv 9091
+new client connected...
+new client connected...
+client disconnected...
+removed proc id: 2447 
+client disconnected...
+removed proc id: 2415
+// 在第二个终端中运行客户端一
+$ ./eclient 127.0.0.1 9091
+Connected......
+Input message(Q to quit): Hi there! 
+Message from server : Hi there!
+ 
+Input message(Q to quit): This server is working for client one!
+Message from server : This server is working for client one!
+ 
+Input message(Q to quit): q
+// 在第三个终端中运行客户端二
+$ ./eclient 127.0.0.1 9091
+Connected......
+Input message(Q to quit): Hi there!
+Message from server : Hi there!
+ 
+Input message(Q to quit): This server is working for client two as well!
+Message from server : This server is working for client two as well!
+ 
+Input message(Q to quit): q
+```
+关于服务器源码的解释参考代号34的c文件中的备注。这里提及几个有趣的地方，一个是我的代码把缓冲大小的设置由`30`提升到了`1024`，否则如上长度的测试信息无法一次发送成功，会导致第二次发送的信息丢失，实际会发送上次没有发送完成的片段。第二个是客户端地址长度变量`addr_size`的设置，原书放在`while`循环中，每次单独客户端都需要运行一次，由于实际上该值的初始化基于固定大小的结构类`sockaddr_in`变量`clnt_addr`，我的代码中在声明时即做了初始化。最后一个是对`accept`和`fork`函数的异常处理，基本上采取直接跳过的`continue`方法，不知道这样是否合理。
+
+### 分割I/O
+
+之前运行的回声客户端程序运行`read`和`write`函数在一个进程中，需要等待前序任务完成后才能继续下一个。如果使用创建子进程的方法分割读写操作到父子进程，不仅可以提升数据的交换效率，也可以使程序本身在结构和逻辑上更简单和稳定，具体参考代号35的c源码文件。执行方式和结果与之前的客户端没有区别：
+```
+$ gcc 35_echo_mpclnt.c -o mpclnt
+$ ./mpclnt 127.0.0.1 9091
+Connected......
+Input message(Q to quit)
+TEST
+Message from server : TEST
+hello there
+Message from server : hello there
+q
+```
