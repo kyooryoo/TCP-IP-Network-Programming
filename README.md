@@ -1162,3 +1162,93 @@ hello there
 Message from server : hello there
 q
 ```
+
+## 进程间通信
+
+原理很简单，两个进程可以同时访问同一个内存空间即可。但进程有独立的内存结构，通过`fork()`函数创建的子进程不会与父进程共享内存空间，这里介绍使用管道函数`pipe()`的方法：
+```
+#include <unistd.h>
+int pipe(int filedes[2]);
+```
+* 以上函数成功返回0，失败返回-1
+* filedes[0]: 接收数据使用的文件描述符，即管道出口
+* filedes[1]: 发送数据使用的文件描述符，即管道入口
+父进程调用`pipe()`函数时创建管道，根据需求将出口或入口的文件描述符传递给子进程。这里要特别注意，文件描述符数组中的第一个成员时管道出口，第二个是管道入口。例如从子进程读取数据的场景下，父进程使用`read()`方法从`filedes[0]`读取信息，子进程使用`write()`方法从`filedes[1]`写入信息，示例程序如下：
+```
+$ gcc 36_pipe_1d.c -o pipe_1d
+$ ./pipe_1d 
+How are you?
+```
+以上程序的源码见代号36的c文件，下面再用一个程序演示双向通信：
+```
+$ gcc 37_pipe_2d.c -o pipe_2d
+$ ./pipe_2d 
+Parent proc output: How are you? 
+Child proc output: I'm good. How about you? 
+```
+具体的过程和逻辑并不复杂。但根据原书，以上程序有一个问题，需要在父子进程的读取间严格的控制流程，否则数据一旦写入管道就会被任意先到的读取命令带走。注释掉子进程部分代码中写入`write`操作后的2秒延迟`sleep`命令，再次编译和运行程序应该会出错。因为子进程写入后立即读取了数据，父进程的读取命令进入无限期等待。但在我的MacOS系统上没有能够成功演示这个错误。
+
+即便MacOS上没有出现原书中描述的错误，也许其他系统的实施方式不同，还是有出错可能。稳妥的方法是为进程间双向的读写建立独立的管道，演示程序如下：
+```
+$ gcc 38_pipe_2xd.c -o pipe_2xd
+$ ./pipe_2xd 
+Parent proc output: How are you? 
+Child proc output: I'm good. How about you? 
+```
+可以看到结果没有什么不同，的确如此，但程序本身变得更健壮了。以下使用管道功能改进之前建立的多进程回声服务器程序，将客户端发送的信息保存到一个外部文本文件中，演示如下：
+```
+// 编译、运行和终止服务器端
+$ gcc 39_echo_storeserv.c -o storeserv
+$ ./storeserv 9092
+new client connected...
+new client connected...
+removed proc id: 80644 
+client disconnected...
+removed proc id: 80647 
+client disconnected...
+removed proc id: 80650 
+^C
+// 显示服务器端保存的回声记录
+$ cat echomsg.txt 
+1
+2
+3
+a
+b
+c
+4
+5
+d
+e
+// 客户端1
+$ ./mpclnt 127.0.0.1 9092
+Connected......
+Input message(Q to quit)
+a
+Message from server : a
+b
+Message from server : b
+c
+Message from server : c
+d
+Message from server : d
+e
+Message from server : e
+q
+// 客户端2
+$ ./mpclnt 127.0.0.1 9092
+Connected......
+Input message(Q to quit)
+1
+Message from server : 1
+2
+Message from server : 2
+3
+Message from server : 3
+4
+Message from server : 4
+5
+Message from server : 5
+q
+```
+需要注意的是，以上服务器端程序需要在接收到十条通话记录后才会保存文件，因此需要两个客户端累计发送超过十条信息，否则服务器端不会执行保存文件的操作。具体使用通道在父子进程之间传递回声信息的操作可以参考代号39的程序源码C文件。
