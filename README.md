@@ -1252,3 +1252,87 @@ Message from server : 5
 q
 ```
 需要注意的是，以上服务器端程序需要在接收到十条通话记录后才会保存文件，因此需要两个客户端累计发送超过十条信息，否则服务器端不会执行保存文件的操作。具体使用通道在父子进程之间传递回声信息的操作可以参考代号39的程序源码C文件。
+
+## I/O复用
+
+之前介绍了使用`fork()`函数复制进程而实现的并发服务器，这一部分介绍使用I/O复用功能实现的并发服务器，可以根据不同使用场景和两种技术手段的优缺点在生产中灵活应用。
+
+为每个新的客户端连接建立子进程会消耗运算资源和内存空间。各进程间内存空间相互独立，因此数据交换的实现也更为复杂。实施IPC（Inter Process Communication）进程间通讯也会增加编程难度和程序复杂度。这里介绍一种新的I/O复用（Multiplexing）技术，在某些场景下可以不创建新的进程而实现对多个客户端的响应。
+
+### select函数
+
+简单说，复用就是在一个通道中建立多个会话，可以有时分复用和频分复用两种方式，即不同的会话在不同的时间窗口或不同的频率上共享一个通道。这里介绍的`select()`函数可以监视接收、传输和发生异常的套接字。该函数的使用较复杂，需要做准备和善后。准备工作包括，设置文件描述符、指定监视范围和设置超时时间。善后工作就是检查调用结果。
+```
+#include <sys/select.h>
+#include <sys/time.h>
+int select(int nfd,fd_set *rset,fd_set *wset,fd_set *eset, const struct timeval *timeout);
+```
+* 以上函数错误返回-1，超时返回0，发生关注的事件返回发生事件的文件描述符数量
+* nfd 监视的文件描述符数组中文件描述符最多的数量
+* rset 监视读取数据的文件描述符数组指针
+* wset 监视传输数据的文件描述符数组指针
+* eset 监视发生异常的文件描述符数组指针
+* timeout 函数的等待和超时时间
+
+`select()`函数的第一个函数是监视的文件描述符数量，或者说监视范围。由于可以监视三个不同的数组，这里定义的监视范围是三个数组中文件描述符最多的对象数量。
+
+`select()`函数的第二到第四个参数都是文件描述符数组（fd_set）类型的对象指针，分别对应对读取、发送和异常的监视。`fd_set`数组实际上是一个位操作数列，每个位可取值为`0`或`1`，对应相应文件描述符的监视结果。对`fd_set`数组的操作可以由以下宏命令完成：
+* FD_ZERO(fd_set *xset): 将`xset`数组的所有位初始化为0
+* FD_SET(int fd, fd_set *xset): 在`xset`数组中注册文件描述符fd的信息
+* FD_CLR(int fd, fd_set *xset): 在`xset`数组中清除文件描述符fd的信息
+* FD_ISSET(int fd, fd_set *xset): 在`xset`数组中如果有文件描述符fd的信息则返回`true`
+
+`select()`函数的最后一个参数设置超时时间，因为该函数只在监视的文件描述符发生变化时才返回，否则会一直停留在监视状态。为了防止无限期的监视使程序陷入死锁，这里配置超时时间以便在合理的监视时间后退出。如果不希望设置超时时间可以传递`NULL`，否则该参数需要遵循`timeval`结构体类型的定义：
+```
+struct timeval
+{
+    long tv_sec: //整秒数
+    long tv_usec; //微秒数
+}
+```
+
+这里创建一个简单的小程序，代号40，用来验证`select()`函数的功能：
+```
+$ gcc 40_select.c -o select
+$ ./select
+Input something within 5 seconds.
+Press Ctrl + C to quit the program.
+hello
+message from console: hello
+Time out!
+Time out!
+goodbye
+message from console: goodbye
+^C
+```
+以上程序初始化了一个`fd_set`类型的变量`read`，设置0位的文件描述符为`1`，启用对标准输入的监视。之后复制`read`文件描述符数组到`temps`，调用`select`函数后，除发生变化的文件描述符对应位外其他数组位会初始化为0。
+
+### I/O复用服务器
+
+使用以上`select`函数实现I/O复用的服务器端，源码参见代号41的C文件：
+```
+// 服务器
+$ gcc 41_echo_selectserv.c -o selserv
+$ ./selserv 9091
+connected client: 4 
+connected client: 5 
+closed client: 4 
+closed client: 5
+// 客户端1
+$ ./eclient 127.0.0.1 9091
+Connected......
+Input message(Q to quit): hello
+Message from server : hello
+Input message(Q to quit): good bye
+Message from server : good bye
+Input message(Q to quit): q
+// 客户端2
+$ ./eclient 127.0.0.1 9091
+Connected......
+Input message(Q to quit): hi there
+Message from server : hi there
+Input message(Q to quit): see you
+Message from server : see you
+Input message(Q to quit): q
+```
+需要注意的是，文件描述符就是从0开始递增的正整数，而套接字由系统自动注册得到文件描述符，套接字对象的值就是其文件描述符的值，因此可以采用`fd_max=serv_sock`和`fd_max=clnt_sock`的操作直接将套接字赋值给表示监视范围的变量。再就是代码中反复出现的`fd_max+1`也是因为文件描述符从0开始，比监视对象实际的数量少1。

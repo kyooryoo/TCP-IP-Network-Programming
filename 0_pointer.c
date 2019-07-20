@@ -1,7 +1,7 @@
 #include <stdio.h>
 int main(void)
 {
-    int *px, x{ 10 };
+    int *px, x=0;
     px = &x;
     printf(x);
     printf(px);

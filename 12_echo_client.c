@@ -50,7 +50,7 @@ int main(int argc, char* argv[])
         if(str_len==-1)
             error_handling("read() error!");
         message[str_len]=0;
-        printf("Message from server : %s \n", message);
+        printf("Message from server : %s", message);
     }
     close(sock);
     return 0;
