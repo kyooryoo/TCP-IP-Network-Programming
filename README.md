@@ -1336,3 +1336,101 @@ Message from server : see you
 Input message(Q to quit): q
 ```
 需要注意的是，文件描述符就是从0开始递增的正整数，而套接字由系统自动注册得到文件描述符，套接字对象的值就是其文件描述符的值，因此可以采用`fd_max=serv_sock`和`fd_max=clnt_sock`的操作直接将套接字赋值给表示监视范围的变量。再就是代码中反复出现的`fd_max+1`也是因为文件描述符从0开始，比监视对象实际的数量少1。
+
+## 其他I/O函数
+之前涉及到读取和写入数据使用的都是`read()`和`write()`函数，这里介绍一些其他关于数据传输的函数和参数。
+
+### `send()`和`recv()`
+
+`send()`和`recv()`函数在Windows平台上也有应用，这里基于Linux平台介绍如下：
+```
+#include <sys/socket.h>
+ssize_t send(int sockfd, const void * buf, size_t nbytes, int flags);
+ssize_t recv(int sockfd, void * buf, size_t nbytes, int flags);
+```
+* 以上发送函数成功返回发送的字节数，失败返回-1
+* 以上接收函数成功返回接收字节数，或在受到EOF时返回0，失败返回-1
+* sockfd 数据发送或接收对象的套接字文件描述符
+* buf 保存待发送数据或接收数据的缓冲地址
+* nbytes 发送的待传输字节数或接收的最大可接收字节数
+* flags 发送或接收数据时指定的可选项信息，具体如下：
+* —> MSG_OOB 传输带外数据（out of band data），用于发送或接收函数
+* —> MSG_PEEK 验证输入缓冲中是否存在接收的数据，用于接收函数
+* —> MSG_DONTROUTE 传输中不参照路由，在本地网络中查找目标，用于发送函数
+* —> MSG_DONTWAIT 调用函数时不做无效等待，用于发送或接收函数 
+* —> MSG_WAITALL 防止函数在没有接收到全部请求的字节数前返回，用于接收
+
+以上可选项在不同操作系统中的支持情况可能不同，以下介绍不同系统间通用的可选项：
+
+### 紧急消息
+
+MSG_OOB可选项用于创建特殊发送方法和通道以发送紧急消息，发送和接收端样例程序代号42和43，验证如下：
+```
+// 先运行接收端程序
+$ gcc 43_oob_recv.c -o obbrecv
+$ ./obbrecv 9190
+// 在发送端运行后可以得到如下结果
+Urgent message: 4 
+Urgent message: 0 
+123
+56789
+// 再运行发送端程序
+$ gcc 42_oob_send.c -o obbsend
+$ ./obbsend 127.0.0.1 9190
+```
+以上程序中有一处未解释过的函数`fcntl(recv_sock, F_SETOWN, getpid())`，该函数将`recv_sock`套接字文件描述符的所有者指向到`getpid()`返回的进程。因为多个进程可以共用拥有一个套接字文件描述符，如果有进程复制或子进程创建发生，会有多个进程同时拥有`recv_sock`。而`urg_hanlder()`函数涉及处理`recv_sock`，且`sigaction(SIGURG, &act, 0)`注册的触发器`act`中调用了`urg_hanlder()`函数。一旦该触发器作用，响应的进程会有多个从而引发问题，在定义触发器前把`recv_sock`套接字文件描述符的所有者统一到当前同一进程是必要的。
+
+根据原书，如上使用MSG_OOB选项后并不会真正实现紧急信息的优先发送，因为`MSG_OOB原意中的带外数据是指通过不同的通信路径传输数据`，并不会提供更快的传输速度或优先级，但是如上结果中可以看到，在我的电脑上的确实现了优先传送。只是在传输的数据量方面依旧如原书所指出，只能优先传递或者说读取最后一个字节（890中的0），其他数据依旧按照普通方式传送。
+
+为什么只传递了一个字节的紧急信息，需要从TCP数据包的包头信息说起。函数`send(sock, "890", strlen("890"), MSG_OOB)`使用`MSG_OOB`设置了一个紧急指针，位于实际传输数据的下一个位，即从第二个参数所指定的传输数据（这里为"890"）第一位开始向右的由第三个参数（这里为3）指定的位置上。除了紧急指针之前的一个字节外，其他数据依旧按照普通方式传送。
+
+### 检查输入缓冲
+
+同时使用MSG_PEEK和MSG_DONTWAIT选项，可以验证输入缓冲中是否存在待接收数据，以下使用程序代号44和45验证：
+```
+// 客户端程序运行结果
+$ gcc 45_peek_recv.c -o peek_recv 
+$ ./peek_recv 9091
+recv() with MSG_PEEK got 15 bytes: something there 
+recv() without MSG_PEEK: something there 
+the read buf is empty now!
+// 客户端程序运行情况
+$ gcc 44_peek_send.c -o peek_send 
+$ ./peek_send 127.0.0.1 9091 "something there"
+```
+
+### `readv()`和`writev()`
+
+在发送和接收数据时整合分散保存在缓存中的数据，可以减少后台调用I/O函数的次数，提升传输效率。
+```
+#include <sys/uio.h>
+ssize_t writev(int filedes, const struct iovec * iov, int iovcnt);
+ssize_t readv(int filedes, const struct iovec * iov, int iovcnt);
+```
+* filedes 需要发送或接收的套接字文件描述符，也支持传输文件或标准输出输入
+* iov iovec结构型数组的地址，包含待发送或待接收数据对象的地址和大小信息
+* -> 该参数使用的结构型数组声明如下
+```
+struct iovec
+{
+    void * iov_base; // 缓冲地址
+    size_t iov_len; // 缓冲大小
+}
+```
+* iovcnt 前一个参数中的数组长度
+
+演示程序代号46，验证过程如下：
+```
+$ gcc 46_writev_readv.c -o wrv
+$ ./wrv
+ABC1234
+Write bytes: 7 
+Input something for testing:
+hi there, this is a testing message!
+Read bytes: 37 
+First message: hi there,  
+Second message: this is a testing message!
+```
+可以查看46号C文件的源码，注意确认`iovec`结构体的定义和`writev`与`readv`函数各变量的应用。注意`writev`函数对`iovec`结构体中各个成员变量指定位数的输出是连续的，从结果看就像一条数据。`readv`函数在指定写入对象的`iovec`结构体中各成员及其位数后也是连续的写入所读取的数据。
+
+由于可以从多个地址读取或写入数据，`readv`和`writev`函数可以减少函数的调用次数，减少数据包个数，使程序拥有更高的效率和更灵活的运行方式，只要适用就可以多多使用。
