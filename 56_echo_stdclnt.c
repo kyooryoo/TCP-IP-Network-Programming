@@ -4,16 +4,17 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-
 #define BUF_SIZE 1024
-void error_handling(char *message);
+void error_handling(char *msg);
 
 int main(int argc, char* argv[])
 {
     int sock;
     struct sockaddr_in serv_addr;
-    char message[BUF_SIZE];
-    int str_len;
+    char rmsg[BUF_SIZE], wmsg[BUF_SIZE];
+
+    FILE *readfp;
+    FILE *writefp;
 
     if(argc!=3)
     {
@@ -21,7 +22,6 @@ int main(int argc, char* argv[])
         exit(1);
     }
 
-    // 创建套接字
     sock=socket(PF_INET, SOCK_STREAM, 0);
     if(sock == -1)
         error_handling("socket() error");
@@ -31,34 +31,35 @@ int main(int argc, char* argv[])
     serv_addr.sin_addr.s_addr=inet_addr(argv[1]);
     serv_addr.sin_port=htons(atoi(argv[2]));
 
-    // 向服务器端发送连接请求
     if(connect(sock, (struct sockaddr*)&serv_addr, sizeof(serv_addr))==-1)
         error_handling("connect() error!");
     else
         puts("Connected......");
 
+    readfp=fdopen(sock, "r");
+    writefp=fdopen(sock, "w");
+
     while(1)
     {
         fputs("Input message(Q to quit): ", stdout);
-        fgets(message, BUF_SIZE, stdin);
+        fgets(wmsg, BUF_SIZE, stdin);
 
-        if(!strcmp(message, "q\n") || !strcmp(message, "Q\n"))
+        if(!strcmp(wmsg, "q\n") || !strcmp(wmsg, "Q\n"))
             break;
+
+        fputs(wmsg, writefp);
+        fflush(writefp);
+        fgets(rmsg, BUF_SIZE, readfp);
         
-        write(sock, message, strlen(message));
-        str_len=read(sock, message, BUF_SIZE-1);
-        if(str_len==-1)
-            error_handling("read() error!");
-        message[str_len]=0;
-        printf("Message from server : %s", message);
+        printf("Message from server : %s", rmsg);
     }
     close(sock);
     return 0;
 }
 
-void error_handling(char *message)
+void error_handling(char *msg)
 {
-    fputs(message, stderr);
+    fputs(msg, stderr);
     fputc('\n', stderr);
     exit(1);
 }
