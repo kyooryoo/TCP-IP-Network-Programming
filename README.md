@@ -1265,7 +1265,7 @@ q
 ```
 #include <sys/select.h>
 #include <sys/time.h>
-int select(int nfd,fd_set *rset,fd_set *wset,fd_set *eset, const struct timeval *timeout);
+int select(int nfd, fd_set *rset, fd_set *wset, fd_set *eset, const struct timeval *timeout);
 ```
 * 以上函数错误返回-1，超时返回0，发生关注的事件返回发生事件的文件描述符数量
 * nfd 监视的文件描述符数组中文件描述符最多的数量
