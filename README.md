@@ -1653,3 +1653,414 @@ I love all of the world
 You are awesome! 
 ```
 如上，可以看到服务器最终可以接收到来自客户端的最后一条信息。验证了`dup()`函数复制的文件描述符有效，通道半关闭的实施是成功的。
+
+## 优化I/O复用
+
+之前在代号41程序中有实施过使用`select()`函数实现I/O复用，但这种方法在性能上无法满足需要同时接入上百个客户端的现代Web服务器环境。主要的问题是，需要使用一个无限循环调用`select()`函数检查所有被监视的文件描述符，每次调用都需要重新向该函数传递监视对象信息。这里造成性能瓶颈的主要原因，是在循环中每次调用`select()`函数都要向操作系统传递监视对象的信息。因为监视对象涉及文件描述符，后者由操作系统来管理。
+
+解决以上性能问题的办法是，只向操作系统传递一次监视对象信息，只在监视对象内容发生变化时通知。Linux环境下的`epoll`函数可以支持此功能，Windows环境下有`IOCP`提供类似支持，MacOS环境下有`kqueue`。`epoll`无需监视所有文件描述符的循环，也不用每次传递监视对象信息。注意，在服务器端接入者不多或要求程序最大兼容性时，`select()`函数依然是最佳选择。
+
+Linux中的`epoll`涉及三个函数：
+* epoll_create 创建保存epoll文件描述符的空间
+* epoll_ctl 注册或注销文件描述符
+* epoll_wait 等待文件描述符发生变化
+类似`select()`函数使用FD_SET变量保存监视的文件描述符，`epoll`方式通过`epoll_event`结构体注册监视的文件描述符。以下结构体数组声明后，`epoll_wait`函数会将发生变化的文件描述符填入该数组，不需要像`select()`函数一样使用循环对文件描述符作监视。
+```
+struct epoll_event {
+    __uint32_t events;
+    epoll_data_t data;
+}
+typeof union epoll_data {
+    void *ptr;
+    int fd;
+    __uint32_t u32;
+    __unit64_t u64;
+} epoll_data_t;  
+```
+
+### epoll的各函数
+
+#### epoll_create
+创建epoll例程
+
+```
+#include <sys/epoll.h>
+int epoll_create(int size);
+```
+* 成功返回epoll文件描述符，失败返回-1
+* size epoll实例的推荐大小
+以上函数创建的epoll文件描述符称为`epoll例程`，其大小主要由系统决定，参数`size`指定的大小只为系统提供参考。`epoll例程`与套接字类似，由系统创建和管理，使用`close()`函数关闭。
+
+#### epoll_ctl
+设置epoll例程
+
+```
+#include <sys/epoll.h>
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+```
+* 以上函数成功返回0，失败返回-1
+* epfd 用于注册监视对象的epoll例程文件描述符
+* op 指定监视对象的添加、删除或更改等操作，可取值如下
+* -> EPOLL_CTL_ADD: 注册文件描述符到epoll例程
+* -> EPOLL_CTL_DEL: 从epoll例程中删除文件描述符
+* -> EPOLL_CTL_MOD: 更改住的的文件描述符所关注的事件类型
+* fd 需要注册的监视对象文件描述符
+* event 监视对象的事件类型
+
+一段实例代码如下：
+```
+struct epoll_event event;
+...
+event.events=EPOLLIN; // 对应需要读取数据的事件
+event.data.fd=sockfd;
+epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &event);
+```
+* 以上代码将`sockfd`注册到`epoll`例程`epfd`中，并在需要读取数据的情况下触发事件。`epoll_event`结构体的定义可以参照前文，这里对与`epoll_event.events`的取值可以是以下几种：
+* -> EPOLLIN 需要读取数据的情况
+* -> EPOLLOUT 可以发送数据的情况
+* -> EPOLLPRI 收到OOB数据的情况
+* -> EPOLLRDHUP 断开连接或半关闭的情况
+* -> EPOLLERR 发生错误的情况
+* -> EPOLLET 以边缘触发的方式的到事件通知
+* -> EPOLLONESHOT 一次性事件，配合EPOLL_CTL_MOD重制事件定义
+
+#### epoll_wait
+
+```
+#include <sys/epoll.h>
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout);
+```
+* 成功返回发生事件的文件描述符的数量，失败返回-1
+* epfd epoll例程的文件描述符，定义监视的事件范围
+* events 保存发生事件的文件描述符的集合，为epoll_event类型结构体的地址
+* maxevents 上一个参数中可以保存的文件描述符的最多个数
+* timeout 以毫秒计算的等待时间，传递-1可以一直等到事件发生
+
+函数调用方法的样本如下：
+```
+int event_cnt;
+struct epoll_event *ep_events;
+...
+ep_events = malloc(sizeof(struct epoll_event)*EPOLL_SIZE);
+...
+event_cnt=epoll_wait(epfd, ep_events, EPOLL_SIZE, -1);
+```
+
+以下验证程序，代号61，根据使用`select`方法的41号程序修改完成：
+```
+
+```
+实际编译时发现EPOLL的各函数所引用的库在MacOS下并不支持，需要用`kqueue`函数替代，目前还没有时间研究，所以包括代号61的程序在内之后涉及EPOLL函数的程序都是在Ubuntu环境下编译和运行验证。
+
+### 条件触发和边缘触发
+
+条件触发方式下，一次事件触发后只要输入缓冲中有数据就一直发送通知。边缘触发方式下，一次事件触发后就不再发送通知，即使输入缓冲中还留有数据，也不再重复注册。使用边缘触发在大部分应用较为复杂的场合可以提高效率，例如有多个客户端以乱序向服务器发送信息，之后服务器需要处理信息再发送给其他客户端。由于分离了接收信息和处理信息的时间点，并且大量减少了触发的监视事件，服务器的处理性能会得到提升。
+
+以下使用程序代号62验证条件触发，也是epoll的默认方式，的工作模式：
+```
+```
+
+要实现边缘触发，需要在Linux系统中通过`errno`变量验证错误原因，并更改套接字特性为非阻塞（Non-blocking）模式。由于边缘触发方式下接收数据仅注册一次事件，所以发生输入事件时需要读取输入缓冲中的全部数据，为此要验证输入缓冲是否为空，即`read()`函数返回-1且变量`errno`中的值为`EAGAIN`，此时就说明输入缓冲中没有数据可读。在边缘触发方式下，以阻塞方式工作的`read()`或`write()`函数可能引起服务器端长时间停顿等待，因此要更改套接字特性以采用非阻塞的`read()`或`write()`函数，为此可以使用`fcntl()`函数更改文件属性：
+```
+#include <fcntl.h>
+int fcntl(int filedes, int cmd, ...);
+```
+* 成功返回cmd参数相关值，失败返回-1
+* filedes 需要更改属性的目标文件描述符
+* cmd 函数调用的目的
+例如，要将某个文件描述符为`fd`的目标更改为非阻塞模式，使用如下方法：
+```
+int flag=fcntl(fd, F_GETFL, 0); // 获取目标文件的属性
+fntl(fd, F_SETFL, flag|O_NONBLOCK); // 为目标文件添加非阻塞属性
+```
+
+使用程序代号63验证边缘触发机制下的信息传输：
+```
+```
+
+## 多线程
+
+线程在Windows中应用更为广泛，但Web服务需要同时向多个客户端提供，因此Linux也引入运行更高效的线程代替进程用在Web服务器端。多进程的缺点是，因为复制操作和独立内存造成的通信苦难会带来额外的系统开销，另外还有每秒数十次甚至上千次的上下文切换。所谓上下文切换，就是在一个CPU内核中运行多个进程时分时在进程间切换以实现同时运行多进程的操作。
+
+对于每个进程，内存空间会分配保存其独有全局变量的数据区，中间是向`malloc()`等函数动态分配空间的堆（heap）, 底层是函数运行时使用的栈（stack）。为了同时运行多条代码并在其间传递数据，以上完全独立的进程就不方便，理想状态是上下文切换不需要切换数据区和堆，并利用数据区和堆交换数据，只在栈级别保持独立和分离的逻辑结构。
+
+为了保持多进程的优点，并在一定程度上克服其缺点，人们引入线程（thread）。各线程的栈建立在共享的数据区和共享的堆区域之上，创建和上下文切换比进程的操作更快速方便，且线程间数据交换不需要特殊的技术。为了构建数据流，在操作系统上首先创建单独执行的进程，在各进程内再创建可以单独执行数据流操作的线程。
+
+### 创建线程
+
+以下介绍的线程创建方法基于POSIX（Portable Operating System Interface for Computer Environment 适用于计算机环境的可移植操作系统接口），一种为提高UNIX系列操作系统间移植性而制定的API规范，因此不仅适用于Linux也适用于大部分UNIX系列操作系统， 如MacOS。线程函数需要单独定义，以便使其在独立的操作系统流中执行：
+```
+#include <pthread.h>
+int thread_create(
+    pthread_t *restrict thread, const pthread_attr_t *restrict attr,
+    void *(*start_routine)(void *), void *restrict arg
+);
+```
+* 以上函数成功返回0，失败返回其他值
+* thread 保存新创建线程ID的变量地址
+* attr 传递线程属性的参数，使用NULL传递默认属性
+* start_routine 相当于线程的main函数，单独执行的函数指针
+* arg 前一个参数中调用函数所需参数的变量地址
+
+以下使用小程序代号64，具体说明见相应C文件内注释：
+```
+$ gcc 64_thread1.c -o thread1
+$ ./thread1
+running thread
+running thread
+running thread
+running thread
+running thread
+end of main!
+```
+这里回顾一下并强调几个重点。一是创建的线程需要单独的main函数以作为单独的流执行，且该函数的参数需要单独定义和通过参数传递给线程创建函数。二是主程序中返回时终止了进程，也同时终止了该进程内创建的线程。最后是原书中提到需要在编译时添加`-lpthread`选项声明，但在我的MacOS上没有添加该声明也可以完成编译，编译后的程序也可以正常运行。
+
+### 线程流程
+
+以上程序代号64中，在线程主程序的等待设置部分有注释，如果修改等待时间为两秒，参数指定的五次信息输出就因为进程时间不足而无法完成。进程等待时间为十秒，正好无法满足线程总计十秒的运行时间，因此结果只会输出四次信息：
+```
+$ gcc 64_thread1.c -o thread1_1
+$ ./thread1_1
+running thread
+running thread
+running thread
+running thread
+end of main!
+```
+为了控制线程的执行，使得进程之间或进程与线程之前建立合理的等待关系，使用`pthread_join()`函数，可以将调用该函数的进程或线程放入等待，直到该函数第一个参数指定的线程终止为止。且该函数可以返回所指定线程的主程序返回值：
+```
+#include <pthread.h>
+int pthread_join(pthread_t thread, void ** status);
+```
+* 以上函数成功返回0，失败返回其他值
+* thread 在该参数指定ID的线程结束后才会从该函数返回
+* status 保存指定线程主函数返回值的变量指针
+使用小程序代号65演示如下：
+```
+$ gcc 65_thread2.c -o thread2
+$ ./thread2
+running thread
+running thread
+running thread
+running thread
+running thread
+Thread return message: Hello, this is a thread! 
+```
+具体解释可以参考程序代号65的C文件内注释，这里提及一点，主程序中已经没有`sleep`等待命令，而新建线程的执行是完整的，新建线程返回的值也被主程序获得并打印出来，这些都是因为`pthread_join()`函数的作用。
+
+### 线程安全
+
+创建多个线程时，需要考虑到多个线程调用同一函数可能产生问题，主要函数内部存在关键部分（Critical Section）。线程安全函数同时被多个函数调用不会发生问题，非线程安全函数则不然。但线程安全函数中也可能存在关键部分，在多线程同时调用时需要通过一些措施避免问题发生。即便是非线程安全函数，也会有相应的线程安全的变种，如：
+```
+struct hostent *gethostbyname(const char *hostname);
+struct hostent *gethostbyname_r(const char *name, struct hostent *result, 
+    char *buffer, intbuflen, int *h_errnop);
+```
+Linux系统下的线程安全函数一般会多一个`_r`的后缀，可以通过调用后者来实现线程安全，或者还有一种使用宏声明的更便捷的方法，在编译时添加`-D_REENTRANT`选项即可完成到进程安全函数的转换，且不必修改`#define`声明及函数参数。以下使用小程序代号66演示多个进程的创建和流程管理：
+```
+$ gcc 66_thread3.c -o thread3
+$ ./thread3
+adding 1 
+adding 2 
+adding 3 
+adding 4 
+adding 5 
+adding 6 
+adding 7 
+adding 8 
+adding 9 
+adding 10 
+result: 55 
+```
+以上程序创建了两个进程，使用`pthread_join()`函数加入了流程，虽然可以正确执行，但因为涉及到临界区却没有做适当处理，在设计上存在缺陷。下面用用小程序代号67演示临界区可能引发的问题：
+```
+// 原书的程序中先创建所有线程再统一加入流程
+$ gcc 67_thread4.c -o thread4
+$ ./thread4
+sizeof long long: 8 
+result: 16967350 
+$ ./thread4
+sizeof long long: 8 
+result: 4395362 
+$ ./thread4
+sizeof long long: 8 
+result: -22996692 
+// 在创建线程后立即加入流程，就不会再出现错误
+$ gcc 67_thread4.c -o thread4_1
+$ ./thread4_1 
+sizeof long long: 8 
+result: 0 
+$ ./thread4_1 
+sizeof long long: 8 
+result: 0 
+$ ./thread4_1 
+sizeof long long: 8 
+result: 0 
+```
+以上程序创建了同样数量的执行递增和递减操作的并行线程，递增和递减的函数的操作对象是同一数列，最后输出的正确结果应该是0。但是由于之前提到的临界区问题，多个线程对统一内存地址同时进行读写操作，造成每次运行结果都不同，且都不为0。但原书中的程序是创建了所有进程后再统一加入流程，如果在每次创建线程后立即添加到流程，就不会出现错误，参见源码注释。
+
+根据原书的解释，多线程同时访问一个内存地址时，需要在一个线程完成读取、计算和更新后再有另一个进程访问，否则就会出现同时操作同一个对象的情况，这个过程叫做同步。但个人认为原书中的用例并不恰当，因为所谓关键部分，即造成问题的操作了同一全局变量的代码块`num+=1`和`num-=1`，并不是问题的关键。如前所述，问题的原因是添加线程入流程的时机。
+
+### 线程同步
+
+如果多个线程同时执行`num+=1`和`num-=1`中的一个或全部，因为涉及到全局变量，就会发生问题，没有在创建线程后立即将其加入流程，即没有在新线程产生后立即安排合理的操作顺序，也许这就是前面样例程序要演示的情况。这里提供解决办法，即实现线程间的同步，即注意处理访问同一内存空间的线程执行顺序问题。
+
+#### 互斥量
+
+这里引入两个概念，互斥量（Mutex）和信号量（Semaphore）。互斥量就好像是洗手间，一次只能容纳一个用户，使用中保持锁闭，释放后才能提供给其他用户使用，互斥量每次只能容纳一个线程并保持锁闭，释放后才能服务其他线程。
+```
+#include <pthread.h>
+int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr);
+int pthread_mutex_destory(pthread_mutex_t *mutex);
+```
+* 以上函数成功返回0，失败返回其他值
+* mutex 创建或销毁时分别保存传递互斥量变量的地址
+* attr 创建时传递互斥量的自定义属性，传递NULL使用默认属性
+如果使用默认配置，也可以应用宏命令快速创建互斥量，但该方法不容易发现初始化中发生的问题：
+```
+pthread_mutex_t mutex=PTHREAD_MUTEX_INITIALIZE;
+```
+在创建互斥量后，可以使用如下函数锁住或释放互斥量（可以把互斥量看作是一种系统锁）：
+```
+#include <pthread.h>
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+```
+* 以上函数成功返回0，失败返回其他值
+进入临界区操作前，调用以上的临界区锁定函数，操作后调用解锁函数。在解锁前如果有其他线程尝试锁定同一互斥量就会进入死锁状态，直到前一个进程释放该互斥量，因此需要格外注意，这里使用小程序代号68演示互斥量的使用：
+```
+$ gcc 68_mutex.c -o mutex
+$ ./mutex
+sizeof long long: 8 
+result: 0 
+$ ./mutex
+sizeof long long: 8 
+result: 0 
+$ ./mutex
+sizeof long long: 8 
+result: 0 
+```
+以上程序创建了一个全局互斥量，在主程序中初始化，在独立流程的递增和递减程序中调用互斥量分别锁定和解锁对全局变量的操作，验证正确结果。需要注意的是，在演示程序代号68中，互斥量的锁定和解锁在递增和递减函数中分别用在不同级别上，递增函数操作在循坏外，递减函数操作在循环内。前者大大减少了互斥量函数的调用总次数，但理论上增加了锁定时间。后者锁定在精细的尺度上，理论上可以减少总的锁定时间，但增加了互斥量函数的调用次数和相应的系统开销。
+
+#### 信号量
+
+信号量与互斥量相似，这里使用二进制信号量完成控制线程顺序：
+```
+#include <semaphore.h>
+int sem_init(sem_t *sem, int pshared, unsigned int value);
+int sem_destroy(sem_t *sem);
+int sem_post(sem_t *sem);
+int sem_wait(sem_t *sem);
+```
+* 以上函数成功返回0，失败返回其他值
+* sem 创建或销毁信号量时保存或传递的信号量变量地址
+* pshared 传递0表示创建的信号量只允许一个进程使用，其他值表示可由多个进程共享
+* value 新创建的信号量初始值
+* sem_post 该函数会为信号量增加1
+* sem_wait 该函数会为信号量减少1
+这里的信号量在技术或规格上可以取比1更大的值，在信号量为0时调用`sem_wait()`函数的线程会进入等待状态，直到有另外的线程调用`sem_post()`函数为信号量加1，此时之前等待的线程会将信号量减1并跳出等待。我们的应用场景即是使用在0和1之间变化的信号量开控制线程的流程和对临界区的独占操作，使用小程序代号69演示如下：
+```
+$ gcc 69_semaphore.c -o sema
+$ ./sema
+Input num: 1
+Input num: 2
+Input num: 3
+Input num: 4
+Input num: 5
+Result: 15 
+
+```
+首先要说一下函数的兼容问题，在MacOS上编译以上程序会遇到一些类似`'sem_init' is deprecated`的问题。为了兼容MacOS需要添加移植用的代码，具体可以参考代号69的程序源文件。MacOS下相关功能的实现需要用macOS专门的`Dispatch Semaphore`库和相关方法，与`semaphore.h`库的相关方法基本一一对应，但没有销毁的`destroy()`函数，且参数定义也有所区别。具体可以参考苹果的开发者网站文档：
+https://developer.apple.com/documentation/dispatch/dispatch_semaphore?language=objc
+
+#### 运行效率
+
+原书没有提供对之前代号67的累加和累减程序的基于信号量的解决方案，这里提供了代号70的小程序增加了这个改进方案。编码中发现`sema`函数不可以放到累加或累减函数内的循环体内部，否则会极大的降低运行效率，这里给出几种情景下的结果：
+```
+// 信号量放在循环内部，循环次数为50,000
+$ gcc 70_semaphore2.c -o sema2
+$ time ./sema2
+sizeof long long: 8 
+result: 0 
+real	0m11.273s
+user	0m3.291s
+sys	0m8.218s
+// 信号量放在循环外部，循环次数为50,000,000
+$ gcc 70_semaphore2.c -o sema3
+$ time ./sema3
+sizeof long long: 8 
+result: 0 
+real	0m8.680s
+user	0m8.625s
+sys	0m0.030s
+```
+从以上结果可以看到，至少对于这一样本程序，信号量函数的反复调用的确会因为极大占用系统资源而降低程序运行效率。以下以分别以放在循环外部为条件，确认信号量的运行效率：
+```
+// 在循环外使用互斥量，循环数为50,000,000
+$ gcc 68_mutex.c -o mutex2
+$ time ./mutex2
+sizeof long long: 8 
+result: 0 
+real	0m8.666s
+user	0m8.616s
+sys	0m0.031s
+// 在循环内使用互斥量，循环数为500,000
+$ gcc 68_mutex.c -o mutex3
+$ time ./mutex3
+sizeof long long: 8 
+result: 0 
+real	0m3.424s
+user	0m3.391s
+sys	0m9.990s
+// 在循环内使用互斥量，循环数为5,000,000
+$ gcc 68_mutex.c -o mutex3
+$ time ./mutex3
+sizeof long long: 8 
+result: 0 
+real	0m34.399s
+user	0m36.166s
+sys	1m37.290s
+```
+从这个程序的结果看，互斥量的运行的效率更高一些，可能因为只涉及一个开关或系统锁变量。循环量运行50k次的时间里互斥量可以运行500k到5000k次之间。
+
+#### 多线程服务器
+
+先补充一下线程销毁的方法，之前只提及了线程的创建和并发控制，这里有三种方法：
+* pthread_join 使用该函数加入流程的线程在运行终止后会自动销毁，问题是调用该函数的线程在程序终止前会一直等待
+* pthread_detach 该函数不会引起调用它的进程进入等待，是通常更为常用的的线程销毁方法
+* 也有其他方法可以在创建线程时指定销毁时机，但实际运行效果与`pthread_detach`差别不大，这里不做介绍
+```
+#include <pthread.h>
+int pthread_detach(pthread_t thread_id);
+```
+* 以上函数成功返回0，失败返回其他值
+* thread_id 需要销毁的线程的ID
+
+以下使用之前介绍的内容创建简单的聊天服务器和客户端程序，代号71和72，验证如下：
+```
+// 首先打开服务器
+$ gcc 71_chat_serv.c -o cserv
+$ ./cserv 9190
+Connected client IP: 127.0.0.1 
+Connected client IP: 127.0.0.1 
+Connected client IP: 127.0.0.1 
+// 接着打开第一个客户端
+$ gcc 72_chat_clnt.c -o cclnt
+$ ./cclnt 127.0.0.1 9190 user1
+Connected......
+this is user1
+[user1] this is user1
+[user2] hi I am user2
+[user3] Ok, this is user3!
+// 再打开第二个客户端
+$ ./cclnt 127.0.0.1 9190 user2
+Connected......
+hi I am user2
+[user2] hi I am user2
+[user3] Ok, this is user3!
+// 最后打开第三个客户端
+$ ./cclnt 127.0.0.1 9190 user3
+Connected......
+Ok, this is user3!
+[user3] Ok, this is user3!
+```
