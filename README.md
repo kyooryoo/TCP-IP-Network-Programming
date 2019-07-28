@@ -1748,7 +1748,20 @@ event_cnt=epoll_wait(epfd, ep_events, EPOLL_SIZE, -1);
 
 以下验证程序，代号61，根据使用`select`方法的41号程序修改完成：
 ```
-
+// server side
+$ gcc 61_echo_epollserv.c -o epollserv
+$ ./epollserv 9190
+connected client: 5 
+closed client: 5 
+// client side
+$ gcc 12_echo_client.c -o eclient_u
+$ ./eclient_u 127.0.0.1 9190
+Connected......
+Input message(Q to quit): hi there
+Message from server : hi there
+Input message(Q to quit): well, it works
+Message from server : well, it works
+Input message(Q to quit): q
 ```
 实际编译时发现EPOLL的各函数所引用的库在MacOS下并不支持，需要用`kqueue`函数替代，目前还没有时间研究，所以包括代号61的程序在内之后涉及EPOLL函数的程序都是在Ubuntu环境下编译和运行验证。
 
@@ -1758,6 +1771,41 @@ event_cnt=epoll_wait(epfd, ep_events, EPOLL_SIZE, -1);
 
 以下使用程序代号62验证条件触发，也是epoll的默认方式，的工作模式：
 ```
+// server side
+$ gcc 62_echo_EPLTserv.c -o EPLTserv
+$ ./EPLTserv 9190
+return epoll_wait
+connected client: 5 
+return epoll_wait
+return epoll_wait
+return epoll_wait
+return epoll_wait
+return epoll_wait
+return epoll_wait
+return epoll_wait
+connected client: 6 
+return epoll_wait
+return epoll_wait
+return epoll_wait
+return epoll_wait
+return epoll_wait
+return epoll_wait
+return epoll_wait
+closed client: 5 
+return epoll_wait
+closed client: 6 
+// client one
+$ ./eclient_u 127.0.0.1 9190
+Connected......
+Input message(Q to quit): hi, this is client one!
+Message from server : hi, this is client one!
+Input message(Q to quit): q
+// client two
+$ ./eclient_u 127.0.0.1 9190
+Connected......
+Input message(Q to quit): hi, this is client two!
+Message from server : hi, this is client two!
+Input message(Q to quit): Q
 ```
 
 要实现边缘触发，需要在Linux系统中通过`errno`变量验证错误原因，并更改套接字特性为非阻塞（Non-blocking）模式。由于边缘触发方式下接收数据仅注册一次事件，所以发生输入事件时需要读取输入缓冲中的全部数据，为此要验证输入缓冲是否为空，即`read()`函数返回-1且变量`errno`中的值为`EAGAIN`，此时就说明输入缓冲中没有数据可读。在边缘触发方式下，以阻塞方式工作的`read()`或`write()`函数可能引起服务器端长时间停顿等待，因此要更改套接字特性以采用非阻塞的`read()`或`write()`函数，为此可以使用`fcntl()`函数更改文件属性：
@@ -1776,6 +1824,33 @@ fntl(fd, F_SETFL, flag|O_NONBLOCK); // 为目标文件添加非阻塞属性
 
 使用程序代号63验证边缘触发机制下的信息传输：
 ```
+// server side
+$ ./EPETserv 9190
+return epoll_wait
+connected client: 5 
+return epoll_wait
+closed client: 5 
+// after client one quits
+return epoll_wait
+connected client: 5 
+return epoll_wait
+// client one
+$ ./eclient_u 127.0.0.1 9190
+Connected......
+Input message(Q to quit): client one!
+Message from server : client one!
+Input message(Q to quit): second message!
+Message from server : second message!
+Input message(Q to quit): last message!
+Message from server : last message!
+Input message(Q to quit): q  
+// client two
+$ ./eclient_u 127.0.0.1 9190
+Connected......
+Input message(Q to quit): client two!
+// after client one quits
+Message from server : client two!
+Input message(Q to quit): q
 ```
 
 ## 多线程

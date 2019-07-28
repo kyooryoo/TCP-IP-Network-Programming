@@ -64,7 +64,7 @@ int main(int argc, char *argv[])
             {
                 addr_size=sizeof(clnt_addr);
                 clnt_sock=accept(serv_sock, (struct sockaddr*)&clnt_addr, &addr_size);
-                event.events=EPOLLIN;
+                event.events=EPOLLIN|EPOLLET;
                 event.data.fd=clnt_sock;
                 epoll_ctl(epfd, EPOLL_CTL_ADD, clnt_sock, &event);
                 printf("connected client: %d \n", clnt_sock);
@@ -98,6 +98,11 @@ int main(int argc, char *argv[])
     close(serv_sock);
     close(epfd);
     return 0;
+}
+
+void setnonblockingmode(int fd) {
+    int flag=fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flag|O_NONBLOCK);
 }
 
 void error_handling(char *msg)
