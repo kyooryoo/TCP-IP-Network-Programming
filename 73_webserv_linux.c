@@ -65,6 +65,7 @@ void *request_handler(void *arg) {
         send_error(clnt_write);
         fclose(clnt_read);
         fclose(clnt_write);
+        // 原书在下方使用的是return方法，但编译总会报错
         exit(1);
     }
     strcpy(method, strtok(req_line, " /"));
@@ -74,10 +75,12 @@ void *request_handler(void *arg) {
         send_error(clnt_write);
         fclose(clnt_read);
         fclose(clnt_write);
+        // 原书在下方使用的是return方法，但编译总会报错
         exit(1);
     }
     fclose(clnt_read);
     send_data(clnt_write, ct, file_name);
+    // 原书在这里没有返回或退出，但编译会报错
     exit(1);
 }
 

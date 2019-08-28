@@ -2166,6 +2166,6 @@ Lings-MacBook-Pro:Socket ljiang$ ./linux_web 9190
 Connection Request : 127.0.0.1:58618
 Connection Request : 127.0.0.1:58619
 ```
-这里已经在MacOS上验证成功，只是原书中没有提到需要独立创建`index.html`文件，运行服务器前需要先创建该文件。另外，源码中所有关于`cnt_len`的语句都可以注释掉，否则反而会引发`ERR_CONTENT_LENGTH_MISMATCH`的错误。
+这里已经在MacOS上验证成功，只是原书中没有提到需要独立创建`index.html`文件，运行服务器前需要先创建该文件。另外，源码中所有关于`cnt_len`的语句都可以注释掉，否则反而会引发`ERR_CONTENT_LENGTH_MISMATCH`的错误。最后，原书中对`void *request_handler(void *arg)`函数的定义中有两处`return;`的返回语句，且在函数末尾没有返回，但实际编译时会报错，这里统一修改和添加为`exit(1);`可通过编译和运行验证。
 
 到此为止，基于Linux的网络编程部分就结束了，以后有时间再补充Windows下的网络编程应用。
